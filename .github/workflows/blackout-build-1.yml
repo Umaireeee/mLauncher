@@ -1,0 +1,387 @@
+name: Blackout build (tested)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Leave blank for an artifact only. Put a tag (e.g. blackout-1) to also cut a GitHub Release."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      KEY_STORE_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+      KEY_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+      KEY_ALIAS: blackout
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - name: Apply Blackout patch
+        run: |
+          set -uo pipefail
+          NEWEST=$(ls -1 blackout*.patch 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "$NEWEST" ]; then
+            echo "::error::No blackout*.patch in the repo root."
+            exit 1
+          fi
+          echo "Using patch file: $NEWEST"
+          if patch -p1 --batch --forward --dry-run < "$NEWEST" > /tmp/dry.txt 2>&1; then
+            patch -p1 --batch --forward < "$NEWEST"
+            echo "Patch applied."
+          elif grep -qiE "previously applied|Reversed" /tmp/dry.txt; then
+            echo "Patch content is already committed - nothing to apply."
+          else
+            echo "::error::Patch does not apply to this tree. Refusing to build."
+            cat /tmp/dry.txt
+            exit 1
+          fi
+
+      # A text patch can't carry font files, so the build fetches them (both SIL Open Font License).
+      # Instrument Serif is the whole look: without it the build stops rather than ship a plain APK.
+      # Geist is only the small print; without it that text falls back to the system sans.
+      - name: Fetch Blackout fonts
+        run: |
+          set -u
+          DEST=app/src/main/assets/blackout
+          mkdir -p "$DEST"
+          fetch() {
+            local out=$1; shift
+            for url in "$@"; do
+              if curl -fsSL --retry 3 --max-time 60 -o "$out" "$url"; then
+                MAGIC=$(head -c4 "$out" | od -An -tx1 | tr -d ' \n')
+                if [ "$MAGIC" = "00010000" ] || [ "$MAGIC" = "74727565" ] || [ "$MAGIC" = "4f54544f" ]; then
+                  echo "Got $(basename "$out") from $url ($(stat -c%s "$out") bytes)"
+                  return 0
+                fi
+                echo "Not a font file: $url"
+              fi
+            done
+            rm -f "$out"
+            return 1
+          }
+          GF=https://github.com/google/fonts/raw/main/ofl
+          JD=https://cdn.jsdelivr.net/gh/google/fonts@main/ofl
+          FS=https://cdn.jsdelivr.net/fontsource/fonts
+          fetch "$DEST/InstrumentSerif-Regular.ttf" \
+            "$GF/instrumentserif/InstrumentSerif-Regular.ttf" \
+            "$JD/instrumentserif/InstrumentSerif-Regular.ttf" \
+            "$FS/instrument-serif@latest/latin-400-normal.ttf" \
+            || { echo "::error::Could not download Instrument Serif."; exit 1; }
+          fetch "$DEST/InstrumentSerif-Italic.ttf" \
+            "$GF/instrumentserif/InstrumentSerif-Italic.ttf" \
+            "$JD/instrumentserif/InstrumentSerif-Italic.ttf" \
+            "$FS/instrument-serif@latest/latin-400-italic.ttf" \
+            || { echo "::error::Could not download Instrument Serif Italic."; exit 1; }
+          fetch "$DEST/Geist.ttf" \
+            "$GF/geist/Geist%5Bwght%5D.ttf" \
+            "$JD/geist/Geist%5Bwght%5D.ttf" \
+            "$FS/geist@latest/latin-400-normal.ttf" \
+            || echo "::warning::Could not download Geist; small text will use the system sans."
+          curl -fsSL --retry 3 -o "$DEST/OFL-InstrumentSerif.txt" "$GF/instrumentserif/OFL.txt" || true
+          curl -fsSL --retry 3 -o "$DEST/OFL-Geist.txt" "$GF/geist/OFL.txt" || true
+          ls -la "$DEST"
+
+      # Every build gets a higher build number, so each one installs as an upgrade.
+      - name: Stamp build number
+        run: |
+          sed -i -E "s/^val build = [0-9]+/val build = ${{ github.run_number }}/" app/build.gradle.kts
+          grep -nE "^val (major|minor|patch|build) =" app/build.gradle.kts
+
+      # mLauncher's build refuses to run at all without a keystore, even for debug.
+      - name: Write signing key
+        env:
+          SIGNING_KEY_B64: ${{ secrets.SIGNING_KEY_B64 }}
+        run: |
+          if [ -z "$SIGNING_KEY_B64" ] || [ -z "$KEY_STORE_PASSWORD" ]; then
+            echo "::error::Add SIGNING_KEY_B64 and SIGNING_PASSWORD secrets first (run 'Blackout: make signing key')."
+            exit 1
+          fi
+          echo "$SIGNING_KEY_B64" | tr -d '\r\n ' | base64 -d > app/mLauncher.jks
+
+      - name: Unit tests (must pass)
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon testProdDebugUnitTest
+
+      - name: Build release and test builds
+        run: ./gradlew --no-daemon assembleProdRelease assembleProdDebug
+
+      - name: Remove signing key
+        if: always()
+        run: shred -u app/mLauncher.jks 2>/dev/null || rm -f app/mLauncher.jks
+
+      - name: Collect APKs
+        run: |
+          REL=$(find app/build/outputs/apk/prod/release -name "*.apk" | head -1)
+          DBG=$(find app/build/outputs/apk/prod/debug -name "*.apk" | head -1)
+          [ -n "$REL" ] && [ -n "$DBG" ] || { echo "::error::APK missing"; exit 1; }
+          cp "$REL" blackout-release.apk
+          cp "$DBG" blackout-test.apk
+          unzip -l blackout-release.apk | grep -q "assets/blackout/InstrumentSerif-Regular.ttf" \
+            || { echo "::error::Instrument Serif is missing from the APK"; exit 1; }
+          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          "$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs blackout-release.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blackout-apks-untested
+          path: |
+            blackout-release.apk
+            blackout-test.apk
+          retention-days: 1
+
+  smoke-test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: blackout-apks-untested
+          path: apk
+
+      - name: Write smoke test
+        run: |
+          cat > smoke.sh << 'EOF'
+          #!/bin/bash
+          set -u
+          REL=app.mlauncher.blackout
+          DBG=app.mlauncher.blackout.debug
+          HOME_ACT=com.github.codeworkscreativehub.mlauncher.MainActivity
+          PASS=0; FAIL=0
+          ok()  { echo "✅ PASS: $1"; PASS=$((PASS+1)); }
+          bad() { echo "❌ FAIL: $1"; FAIL=$((FAIL+1)); }
+          note(){ echo "⚠️  NOTE: $1"; }
+          sh_() { adb shell "$@" 2>&1 | tr -d '\r'; }
+          screen() { adb shell uiautomator dump /sdcard/ui.xml > /dev/null 2>&1; sh_ cat /sdcard/ui.xml; }
+          shot() { adb exec-out screencap -p > "test-results/$1.png"; }
+          # Leave home and come back, which makes home re-read everything.
+          rehome() { adb shell am start -a android.settings.SETTINGS > /dev/null; sleep 3; adb shell input keyevent KEYCODE_HOME; sleep 5; }
+          # Taps the centre of the first on-screen element whose text starts with $1.
+          tap_text() {
+            local node b
+            node=$(screen | grep -o "<node[^>]*text=\"$1[^\"]*\"[^>]*>" | head -1)
+            b=$(echo "$node" | sed -nE 's/.*bounds="\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]".*/\1 \2 \3 \4/p')
+            [ -z "$b" ] && return 1
+            set -- $b
+            adb shell input tap $(( ($1 + $3) / 2 )) $(( ($2 + $4) / 2 ))
+          }
+          mkdir -p test-results
+
+          adb wait-for-device
+          adb shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done'
+          sleep 20
+
+          if adb install -r apk/blackout-release.apk; then ok "Signed release APK installs"; else bad "Release APK does not install"; fi
+          if adb install -r apk/blackout-test.apk; then ok "Test build installs"; else bad "Test build does not install"; exit 1; fi
+
+          # The app to put to rest, and its launcher activity.
+          TARGET=""; ACT=""
+          for p in com.android.camera2 com.android.deskclock com.android.contacts com.android.calendar com.google.android.calculator; do
+            if sh_ pm path "$p" | grep -q "package:"; then
+              COMP=$(sh_ cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "$p" | tail -1)
+              case "$COMP" in */*) TARGET=$p; ACT=${COMP#*/}; case "$ACT" in .*) ACT="$p$ACT";; esac; break;; esac
+            fi
+          done
+          echo "App to put to rest: ${TARGET:-none} (${ACT:-no activity})"
+
+          # Seed the test build before its first launch: onboarding done, the Blackout look (as the
+          # preset sets it), the editorial home, a countdown, and the target app pinned to home.
+          # The test build is debuggable, so run-as can write its private files.
+          FONT=/tmp/CustomFont.ttf
+          if unzip -p apk/blackout-test.apk assets/blackout/InstrumentSerif-Regular.ttf > "$FONT" && [ -s "$FONT" ]; then
+            adb push "$FONT" /data/local/tmp/CustomFont.ttf > /dev/null
+            adb shell "cat /data/local/tmp/CustomFont.ttf | run-as $DBG sh -c 'mkdir -p files && cat > files/CustomFont.ttf'"
+            FONTPREF='<string name="LAUNCHER_FONT">Custom</string>'
+          else
+            note "Font not in the APK; testing with the system font"
+            FONTPREF=''
+          fi
+
+          CD=$(date -d "+10 days" +%F)
+          N=0; APPS=""
+          add_app() { # name package activity
+            APPS="$APPS<string name=\"APP_NAME_$N\">$1</string><string name=\"APP_PACKAGE_$N\">$2</string><string name=\"APP_ACTIVITY_$N\">$3</string><string name=\"APP_USER_$N\"></string>"
+            N=$((N+1))
+          }
+          [ -n "$TARGET" ] && add_app "Focus test" "$TARGET" "$ACT"
+          for p in com.android.chrome com.google.android.apps.maps com.android.settings com.google.android.gm; do
+            [ "$p" = "$TARGET" ] && continue
+            C=$(sh_ cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "$p" | tail -1)
+            case "$C" in */*) A=${C#*/}; case "$A" in .*) A="$p$A";; esac; L=$(echo "$p" | sed -E 's/.*\.//; s/^(.)/\U\1/'); add_app "$L" "$p" "$A";; esac
+            [ $N -ge 4 ] && break
+          done
+
+          {
+            echo "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>"
+            echo "<map>"
+            echo '<boolean name="BLACKOUT_HOME" value="true" />'
+            echo '<boolean name="FIRST_OPEN" value="false" />'
+            echo '<boolean name="FIRST_SETTINGS_OPEN" value="false" />'
+            echo '<boolean name="SHOW_WEATHER" value="false" />'
+            echo '<boolean name="HOME_ALIGNMENT_BOTTOM" value="true" />'
+            echo '<boolean name="APP_USAGE_STATS" value="false" />'
+            echo '<string name="APP_THEME">Dark</string>'
+            echo "$FONTPREF"
+            echo '<int name="BACKGROUND_COLOR" value="-16777216" />'
+            echo '<int name="APP_OPACITY" value="0" />'
+            echo '<int name="APP_COLOR" value="-1185569" />'
+            echo '<int name="CLOCK_COLOR" value="-1185569" />'
+            echo '<int name="DATE_COLOR" value="-7699076" />'
+            echo '<int name="BATTERY_COLOR" value="-9541022" />'
+            echo '<int name="ALARM_CLOCK_COLOR" value="-1531590" />'
+            echo '<int name="CLOCK_SIZE_TEXT" value="118" />'
+            echo '<int name="APP_SIZE_TEXT" value="36" />'
+            echo '<int name="TEXT_PADDING_SIZE" value="10" />'
+            echo "<int name=\"HOME_APPS_NUM\" value=\"$N\" />"
+            echo "<string name=\"BLACKOUT_COUNTDOWN_DATE\">$CD</string>"
+            echo '<string name="BLACKOUT_COUNTDOWN_LABEL">the smoke test</string>'
+            echo "$APPS"
+            echo "</map>"
+          } > /tmp/main.xml
+          {
+            echo "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>"
+            echo '<map><boolean name="ONBOARDING_COMPLETED" value="true" /></map>'
+          } > /tmp/onb.xml
+          adb push /tmp/main.xml /data/local/tmp/main.xml > /dev/null
+          adb push /tmp/onb.xml /data/local/tmp/onb.xml > /dev/null
+          adb shell "run-as $DBG mkdir -p shared_prefs"
+          adb shell "cat /data/local/tmp/onb.xml | run-as $DBG sh -c 'cat > shared_prefs/app.mlauncher.prefs.onboarding.xml'"
+          adb shell "cat /data/local/tmp/main.xml | run-as $DBG sh -c 'cat > shared_prefs/app.mlauncher.prefs.xml'"
+
+          adb logcat -c
+          sh_ cmd package set-home-activity "$DBG/$HOME_ACT"
+          adb shell input keyevent KEYCODE_HOME
+          sleep 8
+          if [ -n "$(sh_ pidof $DBG)" ]; then ok "Launcher is running as the home screen"; else bad "Launcher not running"; fi
+          shot 1-home
+          UI=$(screen)
+          if echo "$UI" | grep -q "days to the smoke test"; then ok "Editorial home shows the countdown"; else bad "Countdown line missing"; fi
+          if echo "$UI" | grep -q "Swipe up for everything"; then ok "Editorial footer shown"; else bad "Footer missing"; fi
+          if echo "$UI" | grep -q " resting"; then bad "Resting shown with nothing at rest"; else ok "Nothing marked resting while nothing is blocked"; fi
+
+          if [ -n "$TARGET" ]; then
+            # --- Suspended (Déchaîner's limits and cooldowns) ---
+            sh_ pm suspend "$TARGET"
+            sleep 4
+            if screen | grep -q "1 resting"; then ok "Updates live when an app is suspended"; else note "Live update not seen; checking the return-home path"; fi
+            rehome
+            UI=$(screen)
+            if echo "$UI" | grep -q "1 resting"; then ok "Status line shows '1 resting' for a suspended app"; else bad "Status line missing a suspended app"; fi
+            if echo "$UI" | grep -q "Focus test RESTING"; then ok "Suspended home app is tagged RESTING"; else bad "Suspended home app not tagged"; fi
+            shot 2-app-suspended
+
+            if tap_text "Focus test"; then
+              sleep 3
+              UI=$(screen)
+              if echo "$UI" | grep -q "is resting"; then ok "Tapping a suspended app opens the resting sheet"; else bad "Resting sheet did not open for a suspended app"; fi
+              if echo "$UI" | grep -q "held back today"; then ok "Sheet counts taps held back"; else bad "Held-back count missing"; fi
+              shot 3-resting-sheet
+              adb shell input keyevent KEYCODE_BACK; sleep 2
+            else
+              bad "Could not find the home app to tap"
+            fi
+
+            sh_ pm unsuspend "$TARGET"
+            rehome
+            if screen | grep -q " resting\|RESTING"; then bad "Still marked after release"; else ok "Released app is back to normal"; fi
+
+            # --- Hidden (Déchaîner's schedule mode). Hiding needs root, which emulator images allow. ---
+            adb root > /dev/null 2>&1; sleep 4; adb wait-for-device
+            OUT=$(sh_ pm hide "$TARGET")
+            if echo "$OUT" | grep -q "true"; then
+              sleep 3
+              rehome
+              UI=$(screen)
+              if echo "$UI" | grep -q "1 resting"; then ok "Status line counts a hidden app"; else bad "Hidden app not counted"; fi
+              if echo "$UI" | grep -q "Focus test RESTING"; then ok "Hidden home app stays on home, tagged RESTING"; else bad "Hidden home app not tagged"; fi
+              shot 4-app-hidden
+              if tap_text "Focus test"; then
+                sleep 3
+                if screen | grep -q "is resting"; then ok "Tapping a hidden app opens the resting sheet"; else bad "Resting sheet did not open for a hidden app"; fi
+                adb shell input keyevent KEYCODE_BACK; sleep 2
+              else
+                bad "Could not find the hidden home app to tap"
+              fi
+              sh_ pm unhide "$TARGET" > /dev/null
+              sleep 3
+              rehome
+              if screen | grep -q " resting\|RESTING"; then bad "Still marked after un-hiding"; else ok "Un-hidden app is back to normal"; fi
+            else
+              note "Emulator would not hide apps ($OUT); hidden-app checks skipped"
+            fi
+          fi
+
+          adb logcat -d > test-results/logcat.txt
+          if grep -A 3 "FATAL EXCEPTION" test-results/logcat.txt | grep -qE "$DBG|$REL"; then
+            bad "Launcher crashed (see logcat.txt)"
+            grep -A 25 "FATAL EXCEPTION" test-results/logcat.txt | head -50
+          else
+            ok "No crashes"
+          fi
+
+          echo "=================================="
+          echo "SMOKE RESULT: $PASS passed, $FAIL failed"
+          echo "=================================="
+          exit $FAIL
+          EOF
+
+      - name: Enable emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run smoke test on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          script: bash smoke.sh
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-results
+          path: test-results/
+
+  publish:
+    needs: smoke-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: blackout-apks-untested
+          path: final
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BLACKOUT-RELEASE-TESTED
+          path: final/blackout-release.apk
+          retention-days: 90
+
+      - name: Cut a GitHub Release
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" \
+            --notes "Blackout launcher. Built and tested by run ${GITHUB_RUN_NUMBER}." \
+            final/blackout-release.apk
