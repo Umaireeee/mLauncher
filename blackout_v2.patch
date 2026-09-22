@@ -1,0 +1,1940 @@
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/build.gradle.kts main/app/build.gradle.kts
+--- orig/app/build.gradle.kts	2026-09-22 21:07:36.478565997 +0000
++++ main/app/build.gradle.kts	2026-09-22 21:13:01.515975919 +0000
+@@ -45,8 +45,10 @@
+     productFlavors {
+         create("prod") {
+             dimension = "channel"
+-            applicationId = "app.mlauncher"
+-            resValue("string", "app_name", "Multi Launcher")
++            // Blackout build: its own id and name, so it installs alongside the official
++            // mLauncher instead of clashing with it (the two are signed with different keys).
++            applicationId = "app.mlauncher.blackout"
++            resValue("string", "app_name", "Blackout")
+         }
+ 
+         create("beta") {
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/MainViewModel.kt main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/MainViewModel.kt
+--- orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/MainViewModel.kt	2026-09-22 21:07:36.478958206 +0000
++++ main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/MainViewModel.kt	2026-09-22 21:12:11.983176829 +0000
+@@ -33,6 +33,8 @@
+ import com.github.codeworkscreativehub.mlauncher.data.ContactListItem
+ import com.github.codeworkscreativehub.mlauncher.data.Prefs
+ import com.github.codeworkscreativehub.mlauncher.helper.ChineseSortHelper
++import com.github.codeworkscreativehub.mlauncher.helper.RestingApps
++import com.github.codeworkscreativehub.mlauncher.helper.RestingSheet
+ import com.github.codeworkscreativehub.mlauncher.helper.analytics.AppUsageMonitor
+ import com.github.codeworkscreativehub.mlauncher.helper.ismlauncherDefault
+ import com.github.codeworkscreativehub.mlauncher.helper.logActivitiesFromPackage
+@@ -215,6 +217,16 @@
+         val packageName = appListItem.activityPackage
+         val currentLockedApps = prefs.lockedApps
+ 
++        // Blackout: a resting app (suspended or hidden by Déchaîner) gets the resting sheet
++        // instead of Android's grey dialog or "App not found". Covers home, drawer and gestures.
++        if (appListItem.user == Process.myUserHandle() && RestingApps.snapshot(appContext).isResting(packageName)) {
++            if (fragment.isAdded) {
++                fragment.hideKeyboard()
++                RestingSheet.show(fragment.requireActivity(), appListItem, prefs)
++            }
++            return
++        }
++
+         logActivitiesFromPackage(appContext, packageName)
+ 
+         if (currentLockedApps.contains(packageName)) {
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/data/Prefs.kt main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/data/Prefs.kt
+--- orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/data/Prefs.kt	2026-09-22 21:07:36.479064256 +0000
++++ main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/data/Prefs.kt	2026-09-22 21:07:45.743742691 +0000
+@@ -417,6 +417,26 @@
+         get() = getSetting(SHOW_BATTERY, true)
+         set(value) = prefsNormal.edit { putBoolean(SHOW_BATTERY, value) }
+ 
++    /** Blackout: hide resting apps (suspended or hidden by a blocker) instead of marking them. */
++    var hideBlockedApps: Boolean
++        get() = getSetting(HIDE_BLOCKED_APPS, false)
++        set(value) = prefsNormal.edit { putBoolean(HIDE_BLOCKED_APPS, value) }
++
++    /** Blackout: the editorial home screen (its own clock, status line and footer). */
++    var blackoutHome: Boolean
++        get() = getSetting(BLACKOUT_HOME, false)
++        set(value) = prefsNormal.edit { putBoolean(BLACKOUT_HOME, value) }
++
++    /** Blackout countdown target as an ISO date (yyyy-MM-dd). Blank means no countdown. */
++    var countdownDate: String
++        get() = getSetting(BLACKOUT_COUNTDOWN_DATE, "")
++        set(value) = prefsNormal.edit { putString(BLACKOUT_COUNTDOWN_DATE, value) }
++
++    /** What the countdown is to, e.g. "the Feb attempt". */
++    var countdownLabel: String
++        get() = getSetting(BLACKOUT_COUNTDOWN_LABEL, "")
++        set(value) = prefsNormal.edit { putString(BLACKOUT_COUNTDOWN_LABEL, value) }
++
+     var showWeather: Boolean
+         get() = getSetting(SHOW_WEATHER, true)
+         set(value) = prefsNormal.edit { putBoolean(SHOW_WEATHER, value) }
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/data/PrefsKeys.kt main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/data/PrefsKeys.kt
+--- orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/data/PrefsKeys.kt	2026-09-22 21:07:36.479086930 +0000
++++ main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/data/PrefsKeys.kt	2026-09-22 21:07:45.742981902 +0000
+@@ -48,6 +48,11 @@
+ internal const val STATUS_BAR = "STATUS_BAR"
+ internal const val NAVIGATION_BAR = "NAVIGATION_BAR"
+ internal const val SHOW_BATTERY = "SHOW_BATTERY"
++// Blackout
++internal const val HIDE_BLOCKED_APPS = "HIDE_BLOCKED_APPS"
++internal const val BLACKOUT_HOME = "BLACKOUT_HOME"
++internal const val BLACKOUT_COUNTDOWN_DATE = "BLACKOUT_COUNTDOWN_DATE"
++internal const val BLACKOUT_COUNTDOWN_LABEL = "BLACKOUT_COUNTDOWN_LABEL"
+ internal const val SHOW_BATTERY_ICON = "SHOW_BATTERY_ICON"
+ internal const val SHOW_WEATHER = "SHOW_WEATHER"
+ internal const val GPS_LOCATION = "GPS_LOCATION"
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutFonts.kt main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutFonts.kt
+--- orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutFonts.kt	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutFonts.kt	2026-09-22 21:08:34.868552705 +0000
+@@ -0,0 +1,82 @@
++package com.github.codeworkscreativehub.mlauncher.helper
++
++import android.content.Context
++import android.graphics.Typeface
++import java.io.File
++
++/**
++ * Blackout's typefaces: Instrument Serif (display) and Geist (small print).
++ *
++ * The font files are fetched by the build workflow into assets/blackout/, because a text patch
++ * can't carry them. Every getter falls back to a system face, so a build without them still
++ * runs — it just looks plainer.
++ */
++object BlackoutFonts {
++
++    private const val SERIF = "blackout/InstrumentSerif-Regular.ttf"
++    private const val SERIF_ITALIC = "blackout/InstrumentSerif-Italic.ttf"
++    private const val SANS = "blackout/Geist.ttf"
++
++    @Volatile
++    private var serif: Typeface? = null
++
++    @Volatile
++    private var serifItalic: Typeface? = null
++    private val sans = HashMap<Int, Typeface>()
++
++    fun serif(context: Context): Typeface =
++        serif ?: (fromAsset(context, SERIF) ?: Typeface.SERIF).also { serif = it }
++
++    fun serifItalic(context: Context): Typeface =
++        serifItalic ?: (fromAsset(context, SERIF_ITALIC) ?: Typeface.create(Typeface.SERIF, Typeface.ITALIC))
++            .also { serifItalic = it }
++
++    /** Geist at a weight (400 regular, 500 medium). */
++    fun sans(context: Context, weight: Int = 400): Typeface = synchronized(sans) {
++        sans[weight] ?: run {
++            val built: Typeface? = try {
++                if (hasAsset(context, SANS)) {
++                    Typeface.Builder(context.assets, SANS)
++                        .setFontVariationSettings("'wght' $weight")
++                        .build()
++                } else null
++            } catch (_: Exception) {
++                null
++            }
++            val tf = built ?: Typeface.create(Typeface.SANS_SERIF, weight, false)
++            sans[weight] = tf
++            tf
++        }
++    }
++
++    /**
++     * Makes Instrument Serif the launcher-wide font, through mLauncher's own "Custom font" slot,
++     * so the drawer and every other screen match. False if the font isn't in this build.
++     */
++    fun installAsLauncherFont(context: Context): Boolean {
++        if (!hasAsset(context, SERIF)) return false
++        return try {
++            val target = File(context.filesDir, "CustomFont.ttf")
++            context.assets.open(SERIF).use { input ->
++                target.outputStream().use { output -> input.copyTo(output) }
++            }
++            target.length() > 0
++        } catch (_: Exception) {
++            false
++        }
++    }
++
++    private fun hasAsset(context: Context, path: String): Boolean = try {
++        context.assets.open(path).use { true }
++    } catch (_: Exception) {
++        false
++    }
++
++    private fun fromAsset(context: Context, path: String): Typeface? =
++        if (!hasAsset(context, path)) null
++        else try {
++            Typeface.createFromAsset(context.assets, path)
++        } catch (_: Exception) {
++            null
++        }
++}
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutLogic.kt main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutLogic.kt
+--- orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutLogic.kt	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutLogic.kt	2026-09-22 21:08:00.951836075 +0000
+@@ -0,0 +1,73 @@
++package com.github.codeworkscreativehub.mlauncher.helper
++
++import java.time.LocalDate
++import java.time.format.DateTimeParseException
++import java.time.temporal.ChronoUnit
++
++/**
++ * Blackout: the pure rules behind the home screen, kept free of Android so they run as plain
++ * JVM unit tests in CI before any emulator does.
++ */
++object BlackoutLogic {
++
++    /** How faint a resting app's name is: 30% of its normal colour. */
++    const val RESTING_ALPHA = 0x4D
++
++    /** A resting app's name colour: the same hue, faded. */
++    fun restingColor(normal: Int, resting: Boolean): Int =
++        if (resting) (normal and 0x00FFFFFF) or (RESTING_ALPHA shl 24) else normal
++
++    /**
++     * Apps a blocker has hidden (Déchaîner's schedule mode uses DevicePolicyManager hiding).
++     *
++     * Android treats a hidden app as uninstalled for normal queries, but still reports it when
++     * asked to include uninstalled packages. So: installed-including-hidden minus visible.
++     * Only apps this launcher has seen as launchable before count ([known]); that keeps out the
++     * system packages some phones ship hidden, which were never real apps to the person.
++     */
++    fun hiddenApps(
++        installedIncludingHidden: Set<String>,
++        visible: Set<String>,
++        known: Set<String>,
++        self: String
++    ): Set<String> =
++        installedIncludingHidden.asSequence()
++            .filter { it !in visible && it in known && it != self }
++            .toSet()
++
++    /** Days from [today] to the countdown date, or null when there is no countdown to show. */
++    fun countdownDays(today: LocalDate, iso: String): Long? {
++        if (iso.isBlank()) return null
++        val target = try {
++            LocalDate.parse(iso.trim())
++        } catch (_: DateTimeParseException) {
++            return null
++        }
++        val days = ChronoUnit.DAYS.between(today, target)
++        return if (days < 0) null else days
++    }
++
++    /** "1h 12m", "45m", "2h". Null under a minute, so a fresh morning shows nothing. */
++    fun screenTime(millis: Long): String? {
++        val minutes = millis / 60_000L
++        if (minutes < 1) return null
++        val h = minutes / 60
++        val m = minutes % 60
++        return when {
++            h == 0L -> "${m}m"
++            m == 0L -> "${h}h"
++            else -> "${h}h ${m}m"
++        }
++    }
++
++    /**
++     * Taps on resting apps held back today. [storedDay] is the epoch day the stored count
++     * belongs to; a new day starts again from zero. Returns the count after this tap.
++     */
++    fun nextHeldBack(storedDay: Long, storedCount: Int, today: Long): Int =
++        if (storedDay == today) storedCount + 1 else 1
++
++    /** The count to show for today without adding a tap. */
++    fun heldBackToday(storedDay: Long, storedCount: Int, today: Long): Int =
++        if (storedDay == today) storedCount else 0
++}
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutPreset.kt main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutPreset.kt
+--- orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutPreset.kt	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutPreset.kt	2026-09-22 21:14:02.711080723 +0000
+@@ -0,0 +1,67 @@
++package com.github.codeworkscreativehub.mlauncher.helper
++
++import android.content.Context
++import com.github.codeworkscreativehub.mlauncher.data.Constants
++import com.github.codeworkscreativehub.mlauncher.data.Prefs
++
++/**
++ * The Blackout look in one tap: the editorial home screen.
++ *
++ * True black (pixels off on AMOLED), warm ivory type, one amber accent that only appears when
++ * something is resting, Instrument Serif throughout. Leaves the person's own choices alone:
++ * which apps are on home, how many, gestures, and anything that isn't how it looks.
++ */
++object BlackoutPreset {
++
++    const val BLACK = 0xFF000000.toInt()
++    const val IVORY = 0xFFEDE8DF.toInt()
++    const val GREY = 0xFF8A857C.toInt()
++    const val DIM = 0xFF6E6A62.toInt()
++    const val AMBER = 0xFFE8A13A.toInt()
++
++    /** Softer than ivory, for the countdown line on the Blackout palette. */
++    const val SOFT = 0xFFC9C3B8.toInt()
++
++    fun apply(context: Context, prefs: Prefs) {
++        prefs.appTheme = Constants.Theme.Dark
++
++        prefs.backgroundColor = BLACK
++        // This setting runs backwards: 0 means fully opaque, 100 fully transparent.
++        prefs.opacityNum = 0
++
++        prefs.appColor = IVORY
++        prefs.clockColor = IVORY
++        prefs.dateColor = GREY
++        prefs.dailyWordColor = GREY
++        prefs.batteryColor = DIM
++        // The accent: the lock, the "resting" tags, the countdown's emphasis.
++        prefs.alarmClockColor = AMBER
++
++        // Instrument Serif everywhere, via mLauncher's custom-font slot. If this build is missing
++        // the font file, Merriweather (bundled with mLauncher) is the closest serif.
++        prefs.fontFamily = if (BlackoutFonts.installAsLauncherFont(context)) {
++            Constants.FontFamily.Custom
++        } else {
++            Constants.FontFamily.Merriweather
++        }
++
++        prefs.clockSize = 118
++        prefs.appSize = 36
++        prefs.dateSize = 14
++        prefs.batterySize = 12
++        prefs.textPaddingSize = 10
++
++        prefs.homeAlignment = Constants.Gravity.Left
++        prefs.homeAlignmentBottom = true
++        prefs.clockAlignment = Constants.Gravity.Left
++        prefs.dateAlignment = Constants.Gravity.Left
++
++        // Words, not icons, on home. Screen time moves into the status line.
++        prefs.iconPackHome = Constants.IconPacks.Disabled
++        prefs.appUsageStats = false
++        prefs.showDailyWord = false
++        prefs.showWeather = false
++
++        prefs.blackoutHome = true
++    }
++}
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/CountdownEditor.kt main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/CountdownEditor.kt
+--- orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/CountdownEditor.kt	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/CountdownEditor.kt	2026-09-22 21:12:11.970913123 +0000
+@@ -0,0 +1,77 @@
++package com.github.codeworkscreativehub.mlauncher.helper
++
++import android.app.AlertDialog
++import android.app.DatePickerDialog
++import android.content.Context
++import android.text.InputType
++import android.widget.EditText
++import android.widget.FrameLayout
++import com.github.codeworkscreativehub.mlauncher.R
++import com.github.codeworkscreativehub.mlauncher.data.Prefs
++import java.time.LocalDate
++import java.time.format.DateTimeFormatter
++
++/**
++ * Blackout: sets the home screen countdown — what it's to, then the date. Used from Settings and
++ * by tapping the countdown line on home.
++ */
++object CountdownEditor {
++
++    fun show(context: Context, prefs: Prefs, onChanged: () -> Unit) {
++        val density = context.resources.displayMetrics.density
++        val input = EditText(context).apply {
++            setText(prefs.countdownLabel)
++            hint = context.getString(R.string.blackout_countdown_hint)
++            setSingleLine(true)
++            inputType = InputType.TYPE_CLASS_TEXT
++            setSelection(text.length)
++        }
++        val frame = FrameLayout(context).apply {
++            val pad = (22 * density).toInt()
++            setPadding(pad, (8 * density).toInt(), pad, 0)
++            addView(input)
++        }
++
++        AlertDialog.Builder(context)
++            .setTitle(R.string.blackout_countdown_title)
++            .setView(frame)
++            .setPositiveButton(R.string.blackout_countdown_pick_date) { _, _ ->
++                val label = input.text.toString().trim()
++                    .ifEmpty { context.getString(R.string.blackout_countdown_default) }
++                val start = parse(prefs.countdownDate) ?: LocalDate.now().plusDays(30)
++                val picker = DatePickerDialog(
++                    context,
++                    { _, year, month, day ->
++                        prefs.countdownLabel = label
++                        prefs.countdownDate = LocalDate.of(year, month + 1, day).toString()
++                        onChanged()
++                    },
++                    start.year, start.monthValue - 1, start.dayOfMonth
++                )
++                picker.datePicker.minDate = System.currentTimeMillis() - 1_000L
++                picker.show()
++            }
++            .setNeutralButton(R.string.blackout_countdown_turn_off) { _, _ ->
++                prefs.countdownDate = ""
++                prefs.countdownLabel = ""
++                onChanged()
++            }
++            .setNegativeButton(android.R.string.cancel, null)
++            .show()
++    }
++
++    /** "the Feb attempt · 1 Feb 2027", or "Off". */
++    fun summary(context: Context, prefs: Prefs): String {
++        val date = parse(prefs.countdownDate)
++        val label = prefs.countdownLabel.trim()
++        if (date == null || label.isEmpty()) return context.getString(R.string.blackout_countdown_off)
++        return "$label · ${date.format(DateTimeFormatter.ofPattern("d MMM yyyy", prefs.appLanguage.locale()))}"
++    }
++
++    private fun parse(iso: String): LocalDate? =
++        if (iso.isBlank()) null else try {
++            LocalDate.parse(iso.trim())
++        } catch (_: Exception) {
++            null
++        }
++}
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/RestingApps.kt main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/RestingApps.kt
+--- orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/RestingApps.kt	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/RestingApps.kt	2026-09-22 21:08:16.195075846 +0000
+@@ -0,0 +1,122 @@
++package com.github.codeworkscreativehub.mlauncher.helper
++
++import android.content.Context
++import android.content.pm.ApplicationInfo
++import android.content.pm.LauncherApps
++import android.content.pm.PackageManager
++import android.os.Process
++import android.os.SystemClock
++import androidx.core.content.edit
++
++/**
++ * Blackout: which apps are "resting" right now — taken away by a blocker such as Déchaîner.
++ *
++ * Two ways an app can be taken away, and both count:
++ * - Suspended (Déchaîner's limits and cooldowns, Digital Wellbeing): still listed, flagged.
++ * - Hidden (Déchaîner's schedule mode): gone from every normal query, as if uninstalled.
++ *
++ * Reads Android's own state rather than talking to Déchaîner, so the two apps need no link.
++ */
++object RestingApps {
++
++    data class Snapshot(val suspended: Set<String>, val hidden: Set<String>) {
++        val all: Set<String> get() = suspended + hidden
++        val count: Int get() = all.size
++        fun isResting(packageName: String): Boolean =
++            packageName.isNotBlank() && (packageName in suspended || packageName in hidden)
++
++        companion object {
++            val EMPTY = Snapshot(emptySet(), emptySet())
++        }
++    }
++
++    /** Rows rebind on every scroll and home refreshes often, so the answer is cached briefly. */
++    private const val CACHE_MS = 2_000L
++
++    private const val FILE = "blackout.state"
++    private const val KEY_KNOWN = "known_launchable"
++    private const val KEY_HELD_DAY = "held_back_day"
++    private const val KEY_HELD_COUNT = "held_back_count"
++
++    @Volatile
++    private var cachedAt = 0L
++
++    @Volatile
++    private var cached: Snapshot? = null
++
++    /** The last answer without asking Android again. Computes once if there is none yet. */
++    fun latest(context: Context): Snapshot = cached ?: snapshot(context)
++
++    /** Fresh-enough answer. Does package queries on a cache miss: prefer calling off the main thread. */
++    fun snapshot(context: Context): Snapshot {
++        val now = SystemClock.elapsedRealtime()
++        val c = cached
++        if (c != null && now - cachedAt < CACHE_MS) return c
++        val fresh = try {
++            read(context.applicationContext)
++        } catch (_: Exception) {
++            c ?: Snapshot.EMPTY
++        }
++        cached = fresh
++        cachedAt = now
++        return fresh
++    }
++
++    /** Forget the cached answer — called the moment Android reports a package change. */
++    fun invalidate() {
++        cachedAt = 0L
++    }
++
++    private fun read(ctx: Context): Snapshot {
++        val launcherApps = ctx.getSystemService(LauncherApps::class.java)
++        val activities = launcherApps.getActivityList(null, Process.myUserHandle())
++
++        val launchable = HashSet<String>()
++        val suspended = HashSet<String>()
++        for (a in activities) {
++            val info = a.applicationInfo
++            launchable += info.packageName
++            if ((info.flags and ApplicationInfo.FLAG_SUSPENDED) != 0) suspended += info.packageName
++        }
++
++        val known = rememberLaunchable(ctx, launchable)
++
++        val pm = ctx.packageManager
++        val base = PackageManager.MATCH_DISABLED_COMPONENTS or
++            PackageManager.MATCH_DISABLED_UNTIL_USED_COMPONENTS
++        val visible = pm.getInstalledApplications(base).mapTo(HashSet()) { it.packageName }
++        val installedIncludingHidden = pm.getInstalledApplications(base or PackageManager.MATCH_UNINSTALLED_PACKAGES)
++            .asSequence()
++            // Still installed for this user. Apps removed with their data kept lack this flag.
++            .filter { (it.flags and ApplicationInfo.FLAG_INSTALLED) != 0 }
++            .mapTo(HashSet()) { it.packageName }
++
++        val hidden = BlackoutLogic.hiddenApps(installedIncludingHidden, visible, known, ctx.packageName)
++        return Snapshot(suspended, hidden)
++    }
++
++    /** Adds today's launchable apps to the remembered set and returns the whole set. */
++    private fun rememberLaunchable(ctx: Context, launchable: Set<String>): Set<String> {
++        val prefs = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
++        val known = prefs.getStringSet(KEY_KNOWN, emptySet())?.toHashSet() ?: HashSet()
++        if (!known.containsAll(launchable)) {
++            known += launchable
++            prefs.edit { putStringSet(KEY_KNOWN, HashSet(known)) }
++        }
++        return known
++    }
++
++    /** Counts one tap on a resting app and returns today's total. */
++    fun recordHeldBack(context: Context): Int {
++        val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
++        val today = java.time.LocalDate.now().toEpochDay()
++        val next = BlackoutLogic.nextHeldBack(
++            prefs.getLong(KEY_HELD_DAY, -1L), prefs.getInt(KEY_HELD_COUNT, 0), today
++        )
++        prefs.edit {
++            putLong(KEY_HELD_DAY, today)
++            putInt(KEY_HELD_COUNT, next)
++        }
++        return next
++    }
++}
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/RestingSheet.kt main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/RestingSheet.kt
+--- orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/RestingSheet.kt	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/helper/RestingSheet.kt	2026-09-22 21:10:02.240160316 +0000
+@@ -0,0 +1,102 @@
++package com.github.codeworkscreativehub.mlauncher.helper
++
++import android.app.Activity
++import android.app.Dialog
++import android.content.res.ColorStateList
++import android.text.SpannableStringBuilder
++import android.text.Spanned
++import android.text.style.ForegroundColorSpan
++import android.text.style.TypefaceSpan
++import android.view.Gravity
++import android.view.LayoutInflater
++import android.view.ViewGroup
++import androidx.core.view.isVisible
++import com.github.codeworkscreativehub.mlauncher.R
++import com.github.codeworkscreativehub.mlauncher.data.AppListItem
++import com.github.codeworkscreativehub.mlauncher.data.Prefs
++import com.github.codeworkscreativehub.mlauncher.databinding.BlackoutRestingSheetBinding
++import java.lang.ref.WeakReference
++import java.time.LocalDate
++
++/**
++ * Blackout: what tapping a resting app shows, anywhere in the launcher — a calm sheet that says
++ * it's resting and counts the tap as one held back, instead of Android's grey "app paused" box
++ * (for a suspended app) or "App not found" (for a hidden one).
++ */
++object RestingSheet {
++
++    private const val BODY = 0xFFA39E94.toInt()
++
++    private var showing: WeakReference<Dialog>? = null
++
++    fun show(activity: Activity, app: AppListItem, prefs: Prefs) {
++        if (activity.isFinishing || activity.isDestroyed) return
++        if (showing?.get()?.isShowing == true) return
++
++        val held = RestingApps.recordHeldBack(activity)
++        val res = activity.resources
++        val b = BlackoutRestingSheetBinding.inflate(LayoutInflater.from(activity))
++
++        val serif = BlackoutFonts.serif(activity)
++        val serifItalic = BlackoutFonts.serifItalic(activity)
++        val sans = BlackoutFonts.sans(activity, 400)
++        val sansMedium = BlackoutFonts.sans(activity, 500)
++        val accent = prefs.alarmClockColor
++        val ink = prefs.appColor
++        val grey = prefs.dateColor
++
++        b.sheetLock.imageTintList = ColorStateList.valueOf(accent)
++        b.sheetKicker.typeface = sansMedium
++        b.sheetKicker.setTextColor(accent)
++
++        val name = prefs.getAppAlias(app.activityPackage).takeIf { it.isNotBlank() } ?: app.activityLabel
++        val lead = res.getString(R.string.blackout_sheet_title_lead, name)
++        val tail = res.getString(R.string.blackout_sheet_title_tail)
++        b.sheetTitle.typeface = serif
++        b.sheetTitle.setTextColor(ink)
++        b.sheetTitle.text = SpannableStringBuilder(lead).append(' ').apply {
++            val start = length
++            append(tail)
++            setSpan(TypefaceSpan(serifItalic), start, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
++            setSpan(ForegroundColorSpan(grey), start, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
++        }
++
++        b.sheetBody.typeface = sans
++        // On the Blackout palette the body sits a step lighter than captions, for easy reading.
++        b.sheetBody.setTextColor(if (grey == BlackoutPreset.GREY) BODY else grey)
++
++        b.sheetHeldNum.typeface = serif
++        b.sheetHeldNum.setTextColor(ink)
++        b.sheetHeldNum.text = held.toString()
++        b.sheetHeldLabel.typeface = sans
++        b.sheetHeldLabel.setTextColor(grey)
++        b.sheetHeldLabel.text = res.getQuantityString(R.plurals.blackout_held_label, held)
++
++        val days = BlackoutLogic.countdownDays(LocalDate.now(), prefs.countdownDate)
++        val label = prefs.countdownLabel.trim()
++        b.sheetCountdownCol.isVisible = days != null && label.isNotEmpty()
++        if (days != null && label.isNotEmpty()) {
++            b.sheetDaysNum.typeface = serif
++            b.sheetDaysNum.setTextColor(ink)
++            b.sheetDaysNum.text = days.toString()
++            b.sheetDaysLabel.typeface = sans
++            b.sheetDaysLabel.setTextColor(grey)
++            b.sheetDaysLabel.text = res.getQuantityString(R.plurals.blackout_days_label, days.toInt(), label)
++        }
++
++        b.sheetBack.typeface = sansMedium
++
++        val dialog = Dialog(activity, R.style.BlackoutSheet)
++        dialog.setContentView(b.root)
++        dialog.setCanceledOnTouchOutside(true)
++        b.sheetBack.setOnClickListener { dialog.dismiss() }
++        dialog.setOnDismissListener { if (showing?.get() === dialog) showing = null }
++        dialog.window?.apply {
++            setGravity(Gravity.BOTTOM)
++            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
++            decorView.setPadding(0, 0, 0, 0)
++        }
++        showing = WeakReference(dialog)
++        dialog.show()
++    }
++}
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/ui/HomeFragment.kt main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/ui/HomeFragment.kt
+--- orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/ui/HomeFragment.kt	2026-09-22 21:07:36.479697295 +0000
++++ main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/ui/HomeFragment.kt	2026-09-22 21:14:28.163230722 +0000
+@@ -2,17 +2,25 @@
+ 
+ import android.annotation.SuppressLint
+ import android.app.admin.DevicePolicyManager
++import android.content.BroadcastReceiver
+ import android.content.ComponentName
+ import android.content.Context
+ import android.content.Context.VIBRATOR_SERVICE
+ import android.content.Intent
+ import android.content.IntentFilter
++import android.content.pm.LauncherApps
++import android.content.res.ColorStateList
++import android.graphics.Color
+ import android.graphics.PorterDuff
+ import android.graphics.PorterDuffColorFilter
++import android.graphics.Typeface
+ import android.graphics.drawable.Drawable
++import android.os.BatteryManager
+ import android.os.Bundle
+ import android.os.Handler
+ import android.os.Looper
++import android.os.Process
++import android.os.UserHandle
+ import android.os.Vibrator
+ import android.text.Spannable
+ import android.text.SpannableString
+@@ -21,11 +29,14 @@
+ import android.text.style.AbsoluteSizeSpan
+ import android.text.style.ForegroundColorSpan
+ import android.text.style.ImageSpan
++import android.text.style.StyleSpan
+ import android.text.style.SuperscriptSpan
++import android.text.style.TypefaceSpan
+ import android.view.Gravity
+ import android.view.LayoutInflater
+ import android.view.View
+ import android.view.ViewGroup
++import android.view.animation.DecelerateInterpolator
+ import android.widget.LinearLayout
+ import android.widget.Space
+ import android.widget.TextView
+@@ -59,12 +70,18 @@
+ import com.github.codeworkscreativehub.mlauncher.R
+ import com.github.codeworkscreativehub.mlauncher.data.Constants
+ import com.github.codeworkscreativehub.mlauncher.data.Constants.Action
++import com.github.codeworkscreativehub.mlauncher.data.AppListItem
+ import com.github.codeworkscreativehub.mlauncher.data.Constants.AppDrawerFlag
+ import com.github.codeworkscreativehub.mlauncher.data.Prefs
+ import com.github.codeworkscreativehub.mlauncher.databinding.FragmentHomeBinding
++import com.github.codeworkscreativehub.mlauncher.helper.BlackoutFonts
++import com.github.codeworkscreativehub.mlauncher.helper.BlackoutLogic
++import com.github.codeworkscreativehub.mlauncher.helper.BlackoutPreset
++import com.github.codeworkscreativehub.mlauncher.helper.CountdownEditor
+ import com.github.codeworkscreativehub.mlauncher.helper.FontManager
+ import com.github.codeworkscreativehub.mlauncher.helper.IconCacheTarget
+ import com.github.codeworkscreativehub.mlauncher.helper.IconPackHelper.getSafeAppIcon
++import com.github.codeworkscreativehub.mlauncher.helper.RestingApps
+ import com.github.codeworkscreativehub.mlauncher.helper.WeatherHelper
+ import com.github.codeworkscreativehub.mlauncher.helper.analytics.AppUsageMonitor
+ import com.github.codeworkscreativehub.mlauncher.helper.formatMillisToHMS
+@@ -91,7 +108,11 @@
+ import com.github.codeworkscreativehub.mlauncher.ui.widgets.WidgetActivity
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++import java.text.SimpleDateFormat
++import java.time.LocalDate
+ import java.util.Calendar
++import java.util.Date
+ 
+ class HomeFragment : BaseFragment(), View.OnClickListener, View.OnLongClickListener {
+ 
+@@ -193,6 +214,18 @@
+         // Update dynamic UI elements
+         updateTimeAndInfo()
+ 
++        // Blackout: re-read which apps are resting each time home comes into view, then follow
++        // changes live while it's showing. The editorial clock ticks with the minute.
++        RestingApps.invalidate()
++        refreshResting()
++        registerPackageCallback()
++        if (prefs.blackoutHome) {
++            updateBlackoutClock(animate = false)
++            registerClockTicks()
++            // Posted, so the home apps (added by an observer as home starts) are there to animate.
++            binding.root.post { playEntrance() }
++        }
++
+         // Register battery receiver
+         context?.let { ctx ->
+             binding.battery.let { textView ->
+@@ -214,6 +247,9 @@
+ 
+     override fun onStop() {
+         super.onStop()
++        unregisterPackageCallback()
++        unregisterClockTicks()
++        settleEntrance()
+ 
+         context?.let { ctx ->
+             try {
+@@ -294,6 +330,8 @@
+                 }
+             }
+         }
++
++        applyBlackoutChrome()
+     }
+ 
+     private fun updateTimeAndInfo() {
+@@ -922,6 +960,7 @@
+         // Update the total number of pages and calculate maximum apps per page
+         updatePagesAndAppsPerPage(prefs.homeAppsNum, prefs.homePagesNum)
+         adjustTextViewMargins()
++        refreshResting()
+     }
+ 
+     private fun adjustTextViewMargins() {
+@@ -1188,8 +1227,368 @@
+         // Update the total number of pages and calculate maximum apps per page
+         updatePagesAndAppsPerPage(prefs.homeAppsNum, prefs.homePagesNum)
+         adjustTextViewMargins()
++        refreshResting()
++    }
++
++
++    // ---------------------------------------------------------------------------------------------
++    // Blackout: the editorial home, and apps that are resting
++    // ---------------------------------------------------------------------------------------------
++
++    private var packageCallback: LauncherApps.Callback? = null
++    private var clockReceiver: BroadcastReceiver? = null
++    private var lastResting = RestingApps.Snapshot.EMPTY
++    private var lastScreenTime: String? = null
++
++    /** Shows the editorial header and footer (or mLauncher's own), and dresses them. */
++    private fun applyBlackoutChrome() {
++        val b = _binding ?: return
++        val ctx = context ?: return
++        val on = prefs.blackoutHome
++        val density = resources.displayMetrics.density
++
++        b.stockHeader.isVisible = !on
++        b.blackoutHeader.isVisible = on
++        b.blackoutFooter.isVisible = on
++
++        // Wider margins, and room under the apps for the footer (its 1dp rule + 48dp row).
++        val side = ((if (on) 30 else 20) * density).toInt()
++        val bottom = ((if (on) 30 + 49 else 30) * density).toInt()
++        b.homeAppsLayout.setPadding(side, b.homeAppsLayout.paddingTop, side, bottom)
++        if (!on) return
++
++        val serif = BlackoutFonts.serif(ctx)
++        val serifItalic = BlackoutFonts.serifItalic(ctx)
++        val sans = BlackoutFonts.sans(ctx, 400)
++        val sansMedium = BlackoutFonts.sans(ctx, 500)
++        val soft = if (prefs.dateColor == BlackoutPreset.GREY) BlackoutPreset.SOFT else prefs.dateColor
++
++        b.bxDate.typeface = sansMedium
++        b.bxDate.setTextColor(prefs.dateColor)
++
++        b.bxTime.typeface = serif
++        b.bxTime.textSize = prefs.clockSize.toFloat()
++        b.bxTime.setTextColor(prefs.clockColor)
++        // Fixed-width digits, so the clock doesn't shift sideways as the minutes change.
++        b.bxTime.fontFeatureSettings = "'tnum' on, 'lnum' on"
++
++        b.bxAmPm.typeface = serifItalic
++        b.bxAmPm.setTextColor(prefs.dateColor)
++
++        b.bxStatus.typeface = sans
++        b.bxStatus.setTextColor(prefs.dateColor)
++
++        b.bxCountdown.typeface = serifItalic
++        b.bxCountdown.setTextColor(soft)
++
++        // A hairline in the caption colour at low strength, so it suits any background.
++        b.bxRule.setBackgroundColor((prefs.dateColor and 0x00FFFFFF) or 0x2E000000)
++        b.bxHint.typeface = sans
++        b.bxHint.setTextColor(prefs.batteryColor)
++        b.bxSearch.imageTintList = ColorStateList.valueOf(prefs.batteryColor)
++
++        val navMargin = if (isGestureNavigationEnabled(ctx)) R.dimen.bottom_margin_gesture_nav
++        else R.dimen.bottom_margin_3_button_nav
++        (b.blackoutFooter.layoutParams as ViewGroup.MarginLayoutParams).bottomMargin =
++            resources.getDimensionPixelSize(navMargin)
++        b.blackoutFooter.requestLayout()
++
++        b.bxClockRow.setOnClickListener { onClick(b.clock) }
++        b.bxDate.setOnClickListener { onClick(b.date) }
++        b.bxCountdown.setOnClickListener {
++            CountdownEditor.show(requireContext(), prefs) { updateCountdown() }
++        }
++        b.blackoutFooter.setOnClickListener {
++            showAppList(AppDrawerFlag.LaunchApp, includeHiddenApps = false)
++        }
++
++        updateBlackoutClock(animate = false)
++        updateStatusLine()
++    }
++
++    /** The editorial clock, date and countdown. Called every minute while home is showing. */
++    private fun updateBlackoutClock(animate: Boolean) {
++        val b = _binding ?: return
++        val ctx = context ?: return
++        if (!prefs.blackoutHome) return
++        val locale = prefs.appLanguage.locale()
++        val now = Date()
++        val is24 = DateFormat.is24HourFormat(ctx)
++
++        val time = SimpleDateFormat(if (is24) "HH:mm" else "h:mm", locale).format(now)
++        if (animate && b.bxTime.text.toString() != time) {
++            // A soft fade as the minute turns over, instead of a hard swap.
++            b.bxTime.alpha = 0.35f
++            b.bxTime.animate().alpha(1f).setDuration(450L).start()
++        }
++        b.bxTime.text = time
++        b.bxAmPm.isVisible = !is24
++        if (!is24) b.bxAmPm.text = SimpleDateFormat("a", locale).format(now).lowercase(locale)
++        b.bxDate.text = SimpleDateFormat("EEEE · d MMMM", locale).format(now)
++        updateCountdown()
++    }
++
++    private fun updateCountdown() {
++        val b = _binding ?: return
++        val days = BlackoutLogic.countdownDays(LocalDate.now(), prefs.countdownDate)
++        val label = prefs.countdownLabel.trim()
++        if (!prefs.blackoutHome || days == null || label.isEmpty()) {
++            b.bxCountdown.isVisible = false
++            return
++        }
++        val locale = prefs.appLanguage.locale()
++        b.bxCountdown.text = if (days == 0L) {
++            getString(R.string.blackout_countdown_today, label.replaceFirstChar { it.titlecase(locale) })
++        } else {
++            resources.getQuantityString(R.plurals.blackout_countdown_line, days.toInt(), days.toInt(), label)
++        }
++        b.bxCountdown.isVisible = true
++    }
++
++    /** "🔒 2 resting  /  64%  /  1h 12m today" — each part only when it has something to say. */
++    private fun updateStatusLine() {
++        val b = _binding ?: return
++        val ctx = context ?: return
++        if (!prefs.blackoutHome) return
++
++        val parts = mutableListOf<CharSequence>()
++        val count = lastResting.count
++        if (count > 0) {
++            val part = SpannableStringBuilder()
++            ContextCompat.getDrawable(ctx, R.drawable.ic_blackout_lock)?.mutate()?.let { lock ->
++                val size = (b.bxStatus.textSize * 0.95f).toInt()
++                lock.setBounds(0, 0, size, size)
++                lock.setTint(prefs.alarmClockColor)
++                part.append(" ")
++                part.setSpan(ImageSpan(lock, ImageSpan.ALIGN_BASELINE), 0, 1, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
++                part.append("  ")
++            }
++            part.append(getString(R.string.blackout_status_resting, count))
++            part.setSpan(ForegroundColorSpan(prefs.alarmClockColor), 0, part.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
++            parts += part
++        }
++
++        val battery = try {
++            ctx.getSystemService(BatteryManager::class.java)
++                ?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
++        } catch (_: Exception) {
++            -1
++        }
++        if (battery in 0..100) parts += "$battery%"
++
++        lastScreenTime?.let { parts += getString(R.string.blackout_status_today, it) }
++
++        val line = SpannableStringBuilder()
++        val divider = (prefs.dateColor and 0x00FFFFFF) or 0x59000000
++        parts.forEachIndexed { i, part ->
++            if (i > 0) {
++                val start = line.length
++                line.append("  /  ")
++                line.setSpan(ForegroundColorSpan(divider), start, line.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
++            }
++            line.append(part)
++        }
++        b.bxStatus.text = line
++        b.bxStatus.isVisible = line.isNotEmpty()
++    }
++
++    /** Asks Android which apps are resting (off the main thread), then updates home. */
++    private fun refreshResting() {
++        val ctx = context?.applicationContext ?: return
++        val editorial = prefs.blackoutHome
++        lifecycleScope.launch {
++            val result = withContext(Dispatchers.IO) {
++                val snapshot = RestingApps.snapshot(ctx)
++                val screen = if (editorial && hasUsageAccessPermission(ctx)) {
++                    try {
++                        BlackoutLogic.screenTime(AppUsageMonitor.getInstance(ctx).getTotalScreenTime(ctx))
++                    } catch (_: Exception) {
++                        null
++                    }
++                } else null
++                snapshot to screen
++            }
++            lastScreenTime = result.second
++            applyResting(result.first)
++        }
+     }
+ 
++    /**
++     * Marks every home app for whether it's resting — faded and italic with a small amber tag, or
++     * hidden when "Hide resting apps" is on — then updates the status line.
++     */
++    private fun applyResting(snapshot: RestingApps.Snapshot) {
++        val b = _binding ?: return
++        lastResting = snapshot
++        val hide = prefs.hideBlockedApps
++        val editorial = prefs.blackoutHome
++        val me = Process.myUserHandle()
++        // pageRanges is lateinit and only set after the first layout pass — reading it earlier
++        // would crash the launcher, so check first.
++        val pageRange = if (::pageRanges.isInitialized) pageRanges.getOrNull(currentPage) else null
++
++        for (i in 0 until b.homeAppsLayout.childCount) {
++            val row = b.homeAppsLayout.getChildAt(i) ?: continue
++            // A row is a bare label, or — with usage stats shown — a layout whose first child is.
++            val label = row as? TextView ?: (row as? ViewGroup)?.getChildAt(0) as? TextView ?: continue
++            val app = prefs.getHomeAppModel(i)
++            // The resting list is this user's; a work-profile copy of the same app is separate.
++            val resting = app.user == me && snapshot.isResting(app.activityPackage)
++            styleHomeLabel(label, app, resting, editorial)
++
++            val onPage = pageRange?.contains(i) ?: true
++            row.isVisible = onPage && !(resting && hide)
++        }
++        updateStatusLine()
++    }
++
++    private fun styleHomeLabel(label: TextView, app: AppListItem, resting: Boolean, editorial: Boolean) {
++        val ctx = label.context
++        // mLauncher's text shadow smudges type on true black.
++        if (editorial) label.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
++        label.setTextColor(BlackoutLogic.restingColor(prefs.appColor, resting))
++
++        val marked = label.getTag(R.id.blackout_marked) == true
++        if (resting) {
++            val text = SpannableStringBuilder(homeLabelText(app))
++            val nameStyle: Any = if (editorial) TypefaceSpan(BlackoutFonts.serifItalic(ctx)) else StyleSpan(Typeface.ITALIC)
++            text.setSpan(nameStyle, 0, text.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
++            text.append(' ')
++            val from = text.length
++            text.append(getString(R.string.blackout_resting_tag).uppercase(prefs.appLanguage.locale()))
++            text.setSpan(AbsoluteSizeSpan(10, true), from, text.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
++            text.setSpan(ForegroundColorSpan(prefs.alarmClockColor), from, text.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
++            text.setSpan(TypefaceSpan(BlackoutFonts.sans(ctx, 500)), from, text.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
++            label.text = text
++            label.setTag(R.id.blackout_marked, true)
++        } else if (marked) {
++            label.text = homeLabelText(app)
++            label.setTag(R.id.blackout_marked, false)
++        }
++    }
++
++    /** The same name mLauncher puts on a home row: its alias, its label, or "select app". */
++    private fun homeLabelText(app: AppListItem): String =
++        if (app.activityPackage.isBlank()) getLocalizedString(R.string.select_app)
++        else prefs.getAppAlias(app.activityPackage).takeIf { it.isNotBlank() } ?: app.activityLabel
++
++    /**
++     * Home's pieces rise into place one after another as you come home. Only on the editorial home.
++     */
++    private fun playEntrance() {
++        val b = _binding ?: return
++        if (!prefs.blackoutHome) return
++        val lift = 14f * resources.displayMetrics.density
++        val pieces = mutableListOf<View>(b.blackoutHeader)
++        for (i in 0 until b.homeAppsLayout.childCount) {
++            b.homeAppsLayout.getChildAt(i)?.takeIf { it.isVisible }?.let { pieces += it }
++        }
++        pieces += b.blackoutFooter
++        pieces.forEachIndexed { index, view ->
++            view.animate().cancel()
++            view.alpha = 0f
++            view.translationY = lift
++            view.animate()
++                .alpha(1f)
++                .translationY(0f)
++                .setStartDelay(index * 45L)
++                .setDuration(380L)
++                .setInterpolator(DecelerateInterpolator(1.8f))
++                .start()
++        }
++    }
++
++    /** Stops the entrance and puts everything where it belongs, so nothing is left half-faded. */
++    private fun settleEntrance() {
++        val b = _binding ?: return
++        val pieces = mutableListOf<View>(b.blackoutHeader, b.blackoutFooter, b.bxTime)
++        for (i in 0 until b.homeAppsLayout.childCount) b.homeAppsLayout.getChildAt(i)?.let { pieces += it }
++        pieces.forEach { view ->
++            view.animate().cancel()
++            view.alpha = 1f
++            view.translationY = 0f
++        }
++    }
++
++    private fun registerClockTicks() {
++        if (clockReceiver != null) return
++        val ctx = context ?: return
++        val receiver = object : BroadcastReceiver() {
++            override fun onReceive(context: Context, intent: Intent) {
++                updateBlackoutClock(animate = true)
++                // Once a minute is plenty for battery, screen time and resting apps.
++                refreshResting()
++            }
++        }
++        val filter = IntentFilter().apply {
++            addAction(Intent.ACTION_TIME_TICK)
++            addAction(Intent.ACTION_TIME_CHANGED)
++            addAction(Intent.ACTION_TIMEZONE_CHANGED)
++            addAction(Intent.ACTION_DATE_CHANGED)
++        }
++        try {
++            ContextCompat.registerReceiver(ctx, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
++            clockReceiver = receiver
++        } catch (_: Exception) {
++            // The clock still updates each time home comes into view.
++        }
++    }
++
++    private fun unregisterClockTicks() {
++        val receiver = clockReceiver ?: return
++        clockReceiver = null
++        try {
++            context?.unregisterReceiver(receiver)
++        } catch (_: Exception) {
++        }
++    }
++
++    /**
++     * Android tells launchers the moment an app is suspended, released, hidden or shown again.
++     * Only listened to while home is showing; the check in onStart covers everything else.
++     */
++    private fun registerPackageCallback() {
++        if (packageCallback != null) return
++        val launcherApps = context?.getSystemService(LauncherApps::class.java) ?: return
++        val callback = object : LauncherApps.Callback() {
++            private fun changed() {
++                RestingApps.invalidate()
++                refreshResting()
++            }
++
++            // Both forms: Android has changed which one it calls, and each version deprecates one
++            // of them. Overriding both means the refresh runs whichever this phone uses.
++            override fun onPackagesSuspended(packageNames: Array<out String>, user: UserHandle) = changed()
++
++            override fun onPackagesSuspended(packageNames: Array<out String>, user: UserHandle, launcherExtras: Bundle?) =
++                changed()
++
++            override fun onPackagesUnsuspended(packageNames: Array<out String>, user: UserHandle) = changed()
++
++            // Hiding an app (Déchaîner's schedule mode) arrives as a removal, and showing it
++            // again as an addition.
++            override fun onPackageRemoved(packageName: String, user: UserHandle) = changed()
++            override fun onPackageAdded(packageName: String, user: UserHandle) = changed()
++            override fun onPackageChanged(packageName: String, user: UserHandle) = changed()
++            override fun onPackagesAvailable(packageNames: Array<out String>, user: UserHandle, replacing: Boolean) = changed()
++            override fun onPackagesUnavailable(packageNames: Array<out String>, user: UserHandle, replacing: Boolean) = changed()
++        }
++        try {
++            launcherApps.registerCallback(callback, Handler(Looper.getMainLooper()))
++            packageCallback = callback
++        } catch (_: Exception) {
++            // Without live updates the onStart check still catches every change on return home.
++        }
++    }
++
++    private fun unregisterPackageCallback() {
++        val callback = packageCallback ?: return
++        packageCallback = null
++        try {
++            context?.getSystemService(LauncherApps::class.java)?.unregisterCallback(callback)
++        } catch (_: Exception) {
++        }
++    }
+ 
+     private val homeScreenPager = "HomeScreenPager"
+ 
+@@ -1240,6 +1639,8 @@
+             val view = binding.homeAppsLayout.getChildAt(i)
+             view.isVisible = i in visibleRange
+         }
++        // Blackout: keep resting apps marked (or hidden) on the page just shown.
++        applyResting(lastResting)
+ 
+         // Update page selector icons
+         val totalPages = pageRanges.size
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/ui/SettingsFragment.kt main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/ui/SettingsFragment.kt
+--- orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/ui/SettingsFragment.kt	2026-09-22 21:07:36.479747241 +0000
++++ main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/ui/SettingsFragment.kt	2026-09-22 21:12:54.009649394 +0000
+@@ -71,6 +71,8 @@
+ import com.github.codeworkscreativehub.mlauncher.data.Constants.AppDrawerFlag
+ import com.github.codeworkscreativehub.mlauncher.data.Prefs
+ import com.github.codeworkscreativehub.mlauncher.databinding.FragmentSettingsBinding
++import com.github.codeworkscreativehub.mlauncher.helper.BlackoutPreset
++import com.github.codeworkscreativehub.mlauncher.helper.CountdownEditor
+ import com.github.codeworkscreativehub.mlauncher.helper.FontManager
+ import com.github.codeworkscreativehub.mlauncher.helper.IconCacheTarget
+ import com.github.codeworkscreativehub.mlauncher.helper.checkWhoInstalled
+@@ -217,6 +219,9 @@
+         var toggledShowDailyWord by remember { mutableStateOf(prefs.showDailyWord) }
+         var toggledShowBattery by remember { mutableStateOf(prefs.showBattery) }
+         var toggledShowBatteryIcon by remember { mutableStateOf(prefs.showBatteryIcon) }
++        var toggledHideBlockedApps by remember { mutableStateOf(prefs.hideBlockedApps) }
++        var toggledBlackoutHome by remember { mutableStateOf(prefs.blackoutHome) }
++        var countdownSummary by remember { mutableStateOf(CountdownEditor.summary(requireContext(), prefs)) }
+         var toggledShowWeather by remember { mutableStateOf(prefs.showWeather) }
+         var toggledShowPrivateSpaces by remember { mutableStateOf(prefs.showPrivateSpaces) }
+         var toggledGPSLocation by remember { mutableStateOf(prefs.gpsLocation) }
+@@ -1087,6 +1092,55 @@
+                         }
+                     )
+ 
++                    // Blackout
++                    SettingsTitle(
++                        text = getLocalizedString(R.string.blackout_section),
++                        fontSize = titleFontSize,
++                    )
++
++                    SettingsSelect(
++                        title = getLocalizedString(R.string.blackout_apply_look),
++                        option = getLocalizedString(R.string.blackout_apply),
++                        fontSize = titleFontSize,
++                        onClick = {
++                            BlackoutPreset.apply(requireContext(), prefs)
++                            showShortToast(getLocalizedString(R.string.blackout_applied))
++                            // Fonts only take effect on restart, the same as mLauncher's font picker.
++                            AppReloader.restartApp(requireContext())
++                        }
++                    )
++
++                    SettingsSwitch(
++                        text = getLocalizedString(R.string.blackout_home_switch),
++                        fontSize = titleFontSize,
++                        defaultState = toggledBlackoutHome,
++                        onCheckedChange = {
++                            toggledBlackoutHome = !prefs.blackoutHome
++                            prefs.blackoutHome = toggledBlackoutHome
++                        }
++                    )
++
++                    SettingsSelect(
++                        title = getLocalizedString(R.string.blackout_countdown),
++                        option = countdownSummary,
++                        fontSize = titleFontSize,
++                        onClick = {
++                            CountdownEditor.show(requireContext(), prefs) {
++                                countdownSummary = CountdownEditor.summary(requireContext(), prefs)
++                            }
++                        }
++                    )
++
++                    SettingsSwitch(
++                        text = getLocalizedString(R.string.blackout_hide_blocked),
++                        fontSize = titleFontSize,
++                        defaultState = toggledHideBlockedApps,
++                        onCheckedChange = {
++                            toggledHideBlockedApps = !prefs.hideBlockedApps
++                            prefs.hideBlockedApps = toggledHideBlockedApps
++                        }
++                    )
++
+                     if (PrivateSpaceManager(requireContext()).isPrivateSpaceSetUp()) {
+                         SettingsSwitch(
+                             text = getLocalizedString(R.string.show_private_spaces),
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/ui/adapter/AppDrawerAdapter.kt main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/ui/adapter/AppDrawerAdapter.kt
+--- orig/app/src/main/java/com/github/codeworkscreativehub/mlauncher/ui/adapter/AppDrawerAdapter.kt	2026-09-22 21:07:36.479838544 +0000
++++ main/app/src/main/java/com/github/codeworkscreativehub/mlauncher/ui/adapter/AppDrawerAdapter.kt	2026-09-22 21:12:38.157708496 +0000
+@@ -8,7 +8,13 @@
+ import android.app.Activity
+ import android.content.Context
+ import android.graphics.drawable.Drawable
++import android.os.Process
+ import android.os.UserHandle
++import android.text.SpannableStringBuilder
++import android.text.Spanned
++import android.text.style.AbsoluteSizeSpan
++import android.text.style.ForegroundColorSpan
++import android.text.style.TypefaceSpan
+ import android.text.Editable
+ import android.text.TextWatcher
+ import android.view.LayoutInflater
+@@ -40,8 +46,11 @@
+ import com.github.codeworkscreativehub.mlauncher.data.Constants.AppDrawerFlag
+ import com.github.codeworkscreativehub.mlauncher.data.Prefs
+ import com.github.codeworkscreativehub.mlauncher.databinding.AdapterAppDrawerBinding
++import com.github.codeworkscreativehub.mlauncher.helper.BlackoutFonts
++import com.github.codeworkscreativehub.mlauncher.helper.BlackoutLogic
+ import com.github.codeworkscreativehub.mlauncher.helper.IconCacheTarget
+ import com.github.codeworkscreativehub.mlauncher.helper.IconPackHelper.getSafeAppIcon
++import com.github.codeworkscreativehub.mlauncher.helper.RestingApps
+ import com.github.codeworkscreativehub.mlauncher.helper.dp2px
+ import com.github.codeworkscreativehub.mlauncher.helper.emptyString
+ import com.github.codeworkscreativehub.mlauncher.helper.getSystemIcons
+@@ -87,7 +96,8 @@
+         val fontColor = prefs.appColor
+         binding.appTitle.setTextColor(fontColor)
+ 
+-        binding.appTitle.textSize = prefs.appSize.toFloat()
++        // Blackout: home names are display-sized; the drawer is a list to scan, so it runs smaller.
++        binding.appTitle.textSize = if (prefs.blackoutHome) prefs.appSize * 0.66f else prefs.appSize.toFloat()
+         val padding: Int = prefs.textPaddingSize
+         binding.appTitle.setPadding(0, padding, 0, padding)
+         return ViewHolder(binding)
+@@ -422,6 +432,22 @@
+             // ----------------------------
+             // 5️⃣ App title
+             appTitle.text = prefs.getAppAlias(appListItem.activityPackage).takeIf { it.isNotBlank() } ?: appListItem.activityLabel
++
++            // Blackout: a resting app (suspended or hidden by a blocker) reads as resting before
++            // it's tapped — faded, with a small amber tag. Re-applied on every bind: rows are recycled.
++            val resting = appListItem.user == Process.myUserHandle() &&
++                RestingApps.latest(context).isResting(appListItem.activityPackage)
++            appTitle.setTextColor(BlackoutLogic.restingColor(prefs.appColor, resting))
++            if (resting) {
++                appTitle.text = SpannableStringBuilder(appTitle.text).apply {
++                    append(' ')
++                    val from = length
++                    append(context.getString(R.string.blackout_resting_tag).uppercase())
++                    setSpan(AbsoluteSizeSpan(9, true), from, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
++                    setSpan(ForegroundColorSpan(prefs.alarmClockColor), from, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
++                    setSpan(TypefaceSpan(BlackoutFonts.sans(context, 500)), from, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
++                }
++            }
+             val params = appTitle.layoutParams as FrameLayout.LayoutParams
+             params.gravity = appLabelGravity
+             appTitle.layoutParams = params
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/res/anim/blackout_sheet_in.xml main/app/src/main/res/anim/blackout_sheet_in.xml
+--- orig/app/src/main/res/anim/blackout_sheet_in.xml	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/res/anim/blackout_sheet_in.xml	2026-09-22 21:09:17.328316824 +0000
+@@ -0,0 +1,12 @@
++<?xml version="1.0" encoding="utf-8"?>
++<set xmlns:android="http://schemas.android.com/apk/res/android"
++    android:interpolator="@android:interpolator/decelerate_cubic">
++    <translate
++        android:duration="320"
++        android:fromYDelta="100%"
++        android:toYDelta="0" />
++    <alpha
++        android:duration="200"
++        android:fromAlpha="0.6"
++        android:toAlpha="1" />
++</set>
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/res/anim/blackout_sheet_out.xml main/app/src/main/res/anim/blackout_sheet_out.xml
+--- orig/app/src/main/res/anim/blackout_sheet_out.xml	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/res/anim/blackout_sheet_out.xml	2026-09-22 21:09:17.329126124 +0000
+@@ -0,0 +1,8 @@
++<?xml version="1.0" encoding="utf-8"?>
++<set xmlns:android="http://schemas.android.com/apk/res/android"
++    android:interpolator="@android:interpolator/accelerate_cubic">
++    <translate
++        android:duration="220"
++        android:fromYDelta="0"
++        android:toYDelta="100%" />
++</set>
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/res/drawable/blackout_handle.xml main/app/src/main/res/drawable/blackout_handle.xml
+--- orig/app/src/main/res/drawable/blackout_handle.xml	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/res/drawable/blackout_handle.xml	2026-09-22 21:09:17.327541858 +0000
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
++    <solid android:color="#FF2A2926" />
++    <corners android:radius="2dp" />
++</shape>
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/res/drawable/blackout_pill.xml main/app/src/main/res/drawable/blackout_pill.xml
+--- orig/app/src/main/res/drawable/blackout_pill.xml	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/res/drawable/blackout_pill.xml	2026-09-22 21:09:17.326793417 +0000
+@@ -0,0 +1,11 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Blackout: the ivory primary button. -->
++<ripple xmlns:android="http://schemas.android.com/apk/res/android"
++    android:color="#33000000">
++    <item>
++        <shape android:shape="rectangle">
++            <solid android:color="#FFEDE8DF" />
++            <corners android:radius="27dp" />
++        </shape>
++    </item>
++</ripple>
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/res/drawable/blackout_rules.xml main/app/src/main/res/drawable/blackout_rules.xml
+--- orig/app/src/main/res/drawable/blackout_rules.xml	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/res/drawable/blackout_rules.xml	2026-09-22 21:09:17.326015269 +0000
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Blackout: hairlines above and below a row, on the sheet's colour. -->
++<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
++    <item>
++        <shape android:shape="rectangle">
++            <solid android:color="#FF1F1E1B" />
++        </shape>
++    </item>
++    <item android:top="1dp" android:bottom="1dp">
++        <shape android:shape="rectangle">
++            <solid android:color="#FF0D0D0C" />
++        </shape>
++    </item>
++</layer-list>
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/res/drawable/blackout_sheet_bg.xml main/app/src/main/res/drawable/blackout_sheet_bg.xml
+--- orig/app/src/main/res/drawable/blackout_sheet_bg.xml	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/res/drawable/blackout_sheet_bg.xml	2026-09-22 21:09:17.325207930 +0000
+@@ -0,0 +1,16 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Blackout: the resting sheet — near-black with a hairline along its rounded top. -->
++<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
++    <item>
++        <shape android:shape="rectangle">
++            <solid android:color="#FF1F1E1B" />
++            <corners android:topLeftRadius="30dp" android:topRightRadius="30dp" />
++        </shape>
++    </item>
++    <item android:top="1dp">
++        <shape android:shape="rectangle">
++            <solid android:color="#FF0D0D0C" />
++            <corners android:topLeftRadius="30dp" android:topRightRadius="30dp" />
++        </shape>
++    </item>
++</layer-list>
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/res/drawable/ic_blackout_lock.xml main/app/src/main/res/drawable/ic_blackout_lock.xml
+--- orig/app/src/main/res/drawable/ic_blackout_lock.xml	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/res/drawable/ic_blackout_lock.xml	2026-09-22 21:09:17.323604467 +0000
+@@ -0,0 +1,18 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Blackout: outline padlock, tinted in code (amber for the accent, faded on resting apps). -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M6.5,10.5h11a2,2 0,0 1,2 2v6.5a2,2 0,0 1,-2 2h-11a2,2 0,0 1,-2 -2v-6.5a2,2 0,0 1,2 -2z"
++        android:strokeWidth="2"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M8,10.5V7a4,4 0,0 1,8 0v3.5"
++        android:strokeWidth="2"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round" />
++</vector>
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/res/drawable/ic_blackout_search.xml main/app/src/main/res/drawable/ic_blackout_search.xml
+--- orig/app/src/main/res/drawable/ic_blackout_search.xml	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/res/drawable/ic_blackout_search.xml	2026-09-22 21:09:17.324416577 +0000
+@@ -0,0 +1,17 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Blackout: thin search glass for the home footer, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M11,4.5a6.5,6.5 0,1 1,0 13a6.5,6.5 0,1 1,0 -13z"
++        android:strokeWidth="1.6"
++        android:strokeColor="#FFFFFFFF" />
++    <path
++        android:pathData="M20,20L15.8,15.8"
++        android:strokeWidth="1.6"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeLineCap="round" />
++</vector>
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/res/layout/blackout_resting_sheet.xml main/app/src/main/res/layout/blackout_resting_sheet.xml
+--- orig/app/src/main/res/layout/blackout_resting_sheet.xml	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/res/layout/blackout_resting_sheet.xml	2026-09-22 21:09:30.247780411 +0000
+@@ -0,0 +1,133 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Blackout: shown instead of Android's grey dialog when a resting app is tapped. -->
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:tools="http://schemas.android.com/tools"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:background="@drawable/blackout_sheet_bg"
++    android:orientation="vertical"
++    android:paddingHorizontal="30dp"
++    android:paddingTop="14dp"
++    android:paddingBottom="30dp">
++
++    <View
++        android:layout_width="36dp"
++        android:layout_height="4dp"
++        android:layout_gravity="center_horizontal"
++        android:background="@drawable/blackout_handle" />
++
++    <LinearLayout
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:layout_marginTop="28dp"
++        android:gravity="center_vertical"
++        android:orientation="horizontal">
++
++        <ImageView
++            android:id="@+id/sheetLock"
++            android:layout_width="13dp"
++            android:layout_height="13dp"
++            android:importantForAccessibility="no"
++            android:src="@drawable/ic_blackout_lock" />
++
++        <TextView
++            android:id="@+id/sheetKicker"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_marginStart="8dp"
++            android:letterSpacing="0.24"
++            android:text="@string/blackout_resting_tag"
++            android:textAllCaps="true"
++            android:textSize="10sp" />
++    </LinearLayout>
++
++    <TextView
++        android:id="@+id/sheetTitle"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_marginTop="12dp"
++        android:includeFontPadding="false"
++        android:lineSpacingMultiplier="0.98"
++        android:textSize="42sp"
++        tools:text="Instagram is resting." />
++
++    <TextView
++        android:id="@+id/sheetBody"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_marginTop="14dp"
++        android:lineSpacingMultiplier="1.3"
++        android:text="@string/blackout_sheet_body"
++        android:textSize="15sp" />
++
++    <LinearLayout
++        android:id="@+id/sheetStats"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_marginTop="26dp"
++        android:background="@drawable/blackout_rules"
++        android:baselineAligned="false"
++        android:orientation="horizontal"
++        android:paddingVertical="18dp">
++
++        <LinearLayout
++            android:layout_width="0dp"
++            android:layout_height="wrap_content"
++            android:layout_weight="1"
++            android:orientation="vertical">
++
++            <TextView
++                android:id="@+id/sheetHeldNum"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:includeFontPadding="false"
++                android:textSize="34sp"
++                tools:text="7" />
++
++            <TextView
++                android:id="@+id/sheetHeldLabel"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="6dp"
++                android:textSize="12sp"
++                tools:text="taps held back today" />
++        </LinearLayout>
++
++        <LinearLayout
++            android:id="@+id/sheetCountdownCol"
++            android:layout_width="0dp"
++            android:layout_height="wrap_content"
++            android:layout_weight="1"
++            android:orientation="vertical">
++
++            <TextView
++                android:id="@+id/sheetDaysNum"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:includeFontPadding="false"
++                android:textSize="34sp"
++                tools:text="131" />
++
++            <TextView
++                android:id="@+id/sheetDaysLabel"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="6dp"
++                android:textSize="12sp"
++                tools:text="days to the Feb attempt" />
++        </LinearLayout>
++    </LinearLayout>
++
++    <TextView
++        android:id="@+id/sheetBack"
++        android:layout_width="match_parent"
++        android:layout_height="54dp"
++        android:layout_marginTop="26dp"
++        android:background="@drawable/blackout_pill"
++        android:clickable="true"
++        android:focusable="true"
++        android:gravity="center"
++        android:text="@string/blackout_back_home"
++        android:textColor="#FF0A0A0A"
++        android:textSize="15sp" />
++</LinearLayout>
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/res/layout/fragment_home.xml main/app/src/main/res/layout/fragment_home.xml
+--- orig/app/src/main/res/layout/fragment_home.xml	2026-09-22 21:07:36.482800400 +0000
++++ main/app/src/main/res/layout/fragment_home.xml	2026-09-22 21:10:37.874986974 +0000
+@@ -24,6 +24,7 @@
+         android:orientation="vertical">
+ 
+         <androidx.appcompat.widget.LinearLayoutCompat
++            android:id="@+id/stockHeader"
+             android:layout_width="match_parent"
+             android:layout_height="wrap_content"
+             android:layout_marginTop="6dp"
+@@ -97,6 +98,76 @@
+             </LinearLayout>
+         </androidx.appcompat.widget.LinearLayoutCompat>
+ 
++        <!-- Blackout: the editorial header. Shown instead of the one above when Editorial home is on.
++             Plain TextViews on purpose: they keep Blackout's own faces when mLauncher reloads its font. -->
++        <LinearLayout
++            android:id="@+id/blackoutHeader"
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="40dp"
++            android:orientation="vertical"
++            android:paddingHorizontal="10dp"
++            android:visibility="gone">
++
++            <TextView
++                android:id="@+id/bxDate"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:letterSpacing="0.22"
++                android:textAllCaps="true"
++                android:textSize="11sp"
++                tools:text="Wednesday · 23 September" />
++
++            <LinearLayout
++                android:id="@+id/bxClockRow"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="2dp"
++                android:baselineAligned="true"
++                android:background="?android:attr/selectableItemBackground"
++                android:orientation="horizontal">
++
++                <TextView
++                    android:id="@+id/bxTime"
++                    android:layout_width="wrap_content"
++                    android:layout_height="wrap_content"
++                    android:includeFontPadding="false"
++                    android:letterSpacing="-0.03"
++                    android:maxLines="1"
++                    android:textSize="118sp"
++                    tools:text="9:47" />
++
++                <TextView
++                    android:id="@+id/bxAmPm"
++                    android:layout_width="wrap_content"
++                    android:layout_height="wrap_content"
++                    android:layout_marginStart="8dp"
++                    android:textSize="26sp"
++                    tools:text="pm" />
++            </LinearLayout>
++
++            <TextView
++                android:id="@+id/bxStatus"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="18dp"
++                android:gravity="center_vertical"
++                android:letterSpacing="0.02"
++                android:textSize="12sp"
++                tools:text="2 resting  /  64%  /  1h 12m today" />
++
++            <TextView
++                android:id="@+id/bxCountdown"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="22dp"
++                android:lineSpacingMultiplier="1.1"
++                android:textSize="21sp"
++                android:visibility="gone"
++                tools:text="131 days to the Feb attempt."
++                tools:visibility="visible" />
++        </LinearLayout>
++
+         <!-- First run tips -->
+         <LinearLayout
+             android:id="@+id/firstRunTips"
+@@ -144,6 +215,47 @@
+         android:paddingTop="100dp"
+         android:paddingBottom="30dp" />
+ 
++    <!-- Blackout: a hairline and a quiet way into the drawer, under the home apps. -->
++    <LinearLayout
++        android:id="@+id/blackoutFooter"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_gravity="bottom"
++        android:layout_marginHorizontal="30dp"
++        android:background="?android:attr/selectableItemBackground"
++        android:contentDescription="@string/blackout_open_drawer"
++        android:orientation="vertical"
++        android:visibility="gone">
++
++        <View
++            android:id="@+id/bxRule"
++            android:layout_width="match_parent"
++            android:layout_height="1dp" />
++
++        <LinearLayout
++            android:layout_width="match_parent"
++            android:layout_height="48dp"
++            android:gravity="center_vertical"
++            android:orientation="horizontal">
++
++            <TextView
++                android:id="@+id/bxHint"
++                android:layout_width="0dp"
++                android:layout_height="wrap_content"
++                android:layout_weight="1"
++                android:importantForAccessibility="no"
++                android:text="@string/blackout_footer_hint"
++                android:textSize="12sp" />
++
++            <ImageView
++                android:id="@+id/bxSearch"
++                android:layout_width="16dp"
++                android:layout_height="16dp"
++                android:importantForAccessibility="no"
++                android:src="@drawable/ic_blackout_search" />
++        </LinearLayout>
++    </LinearLayout>
++
+     <com.github.creativecodecat.components.views.FontAppCompatTextView
+         android:id="@+id/homeScreenPager"
+         style="@style/TextSmall"
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/res/values/ids_blackout.xml main/app/src/main/res/values/ids_blackout.xml
+--- orig/app/src/main/res/values/ids_blackout.xml	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/res/values/ids_blackout.xml	2026-09-22 21:12:03.422606474 +0000
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <!-- Blackout: marks a home label whose text Blackout rewrote, so it's restored exactly once. -->
++    <item name="blackout_marked" type="id" />
++</resources>
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/res/values/strings.xml main/app/src/main/res/values/strings.xml
+--- orig/app/src/main/res/values/strings.xml	2026-09-22 21:07:36.484219069 +0000
++++ main/app/src/main/res/values/strings.xml	2026-09-22 21:12:03.432976945 +0000
+@@ -498,4 +498,42 @@
+     </string-array>
+ 
+ 
++    <!-- Blackout -->
++    <string name="blackout_section">Blackout</string>
++    <string name="blackout_apply_look">Blackout look</string>
++    <string name="blackout_apply">Apply</string>
++    <string name="blackout_applied">Blackout look applied</string>
++    <string name="blackout_home_switch">Editorial home</string>
++    <string name="blackout_hide_blocked">Hide resting apps</string>
++    <string name="blackout_countdown">Countdown</string>
++    <string name="blackout_countdown_off">Off</string>
++    <string name="blackout_countdown_title">Count down to…</string>
++    <string name="blackout_countdown_hint">e.g. the Feb attempt</string>
++    <string name="blackout_countdown_pick_date">Pick the date</string>
++    <string name="blackout_countdown_turn_off">Turn off</string>
++    <string name="blackout_countdown_set">Countdown set</string>
++    <string name="blackout_countdown_default">the big day</string>
++    <string name="blackout_resting_tag">Resting</string>
++    <string name="blackout_status_resting">%d resting</string>
++    <string name="blackout_status_today">%s today</string>
++    <string name="blackout_footer_hint">Swipe up for everything</string>
++    <string name="blackout_open_drawer">Open all apps</string>
++    <string name="blackout_sheet_title_lead">%s is</string>
++    <string name="blackout_sheet_title_tail">resting.</string>
++    <string name="blackout_sheet_body">Déchaîner is holding it. It opens again the moment it\'s released.</string>
++    <string name="blackout_back_home">Back to home</string>
++    <string name="blackout_countdown_today">%s — today.</string>
++    <plurals name="blackout_countdown_line">
++        <item quantity="one">%1$d day to %2$s.</item>
++        <item quantity="other">%1$d days to %2$s.</item>
++    </plurals>
++    <plurals name="blackout_days_label">
++        <item quantity="one">day to %s</item>
++        <item quantity="other">days to %s</item>
++    </plurals>
++    <plurals name="blackout_held_label">
++        <item quantity="one">tap held back today</item>
++        <item quantity="other">taps held back today</item>
++    </plurals>
++
+ </resources>
+\ No newline at end of file
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/res/values/styles_blackout.xml main/app/src/main/res/values/styles_blackout.xml
+--- orig/app/src/main/res/values/styles_blackout.xml	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/main/res/values/styles_blackout.xml	2026-09-22 21:09:17.329899164 +0000
+@@ -0,0 +1,18 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <!-- Blackout: the resting sheet slides up from the bottom over a deep dim. -->
++    <style name="BlackoutSheetAnim">
++        <item name="android:windowEnterAnimation">@anim/blackout_sheet_in</item>
++        <item name="android:windowExitAnimation">@anim/blackout_sheet_out</item>
++    </style>
++
++    <style name="BlackoutSheet" parent="@android:style/Theme.Material.Dialog.NoActionBar">
++        <item name="android:windowBackground">@android:color/transparent</item>
++        <item name="android:windowIsFloating">true</item>
++        <item name="android:backgroundDimEnabled">true</item>
++        <item name="android:backgroundDimAmount">0.72</item>
++        <item name="android:windowAnimationStyle">@style/BlackoutSheetAnim</item>
++        <item name="android:windowMinWidthMajor">100%</item>
++        <item name="android:windowMinWidthMinor">100%</item>
++    </style>
++</resources>
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/res/xml/accessibility_service_config.xml main/app/src/main/res/xml/accessibility_service_config.xml
+--- orig/app/src/main/res/xml/accessibility_service_config.xml	2026-09-22 21:07:36.484277807 +0000
++++ main/app/src/main/res/xml/accessibility_service_config.xml	2026-09-22 21:13:01.516099459 +0000
+@@ -6,4 +6,4 @@
+     android:canRetrieveWindowContent="true"
+     android:description="@string/accessibility_service_description"
+     android:notificationTimeout="100"
+-    android:packageNames="app.mlauncher.debug, app.mlauncher" />
++    android:packageNames="app.mlauncher.debug, app.mlauncher, app.mlauncher.blackout, app.mlauncher.blackout.debug" />
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/main/res/xml/blacklist.xml main/app/src/main/res/xml/blacklist.xml
+--- orig/app/src/main/res/xml/blacklist.xml	2026-09-22 21:07:36.484298852 +0000
++++ main/app/src/main/res/xml/blacklist.xml	2026-09-22 21:13:01.516216027 +0000
+@@ -2,6 +2,9 @@
+ <blacklist>
+     <!-- Example: Package names of apps to be blacklisted -->
+     <app packageName="app.mlauncher" />
++    <!-- Blackout build: keep the launcher out of its own app list -->
++    <app packageName="app.mlauncher.blackout" />
++    <app packageName="app.mlauncher.blackout.debug" />
+     <app packageName="com.opera.browser" />
+     <app packageName="com.google.android.apps.healthdata" />
+     <app packageName="com.google.android.healthconnect.controller" />
+diff -ruN -x .github -x README.md -x '*.patch' orig/app/src/test/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutLogicTest.kt main/app/src/test/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutLogicTest.kt
+--- orig/app/src/test/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutLogicTest.kt	1970-01-01 00:00:00.000000000 +0000
++++ main/app/src/test/java/com/github/codeworkscreativehub/mlauncher/helper/BlackoutLogicTest.kt	2026-09-22 21:16:38.628081695 +0000
+@@ -0,0 +1,154 @@
++package com.github.codeworkscreativehub.mlauncher.helper
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.time.LocalDate
++
++/**
++ * Pins Blackout's rules. They're pure, so they run on the JVM in CI before any emulator does.
++ */
++class BlackoutLogicTest {
++
++    private val ivory = 0xFFEDE8DF.toInt()
++    private val today = LocalDate.of(2026, 9, 23)
++
++    // --- resting colour ---
++
++    @Test
++    fun aRestingAppIsFadedToThirtyPercent() {
++        assertEquals(0x4DEDE8DF, BlackoutLogic.restingColor(ivory, resting = true))
++    }
++
++    @Test
++    fun anAvailableAppKeepsItsExactColour() {
++        assertEquals(ivory, BlackoutLogic.restingColor(ivory, resting = false))
++    }
++
++    @Test
++    fun fadingKeepsTheHue() {
++        val faded = BlackoutLogic.restingColor(ivory, resting = true)
++        assertEquals(ivory and 0x00FFFFFF, faded and 0x00FFFFFF)
++    }
++
++    // --- hidden apps (Déchaîner's schedule mode) ---
++
++    @Test
++    fun anAppHiddenByTheBlockerCounts() {
++        val hidden = BlackoutLogic.hiddenApps(
++            installedIncludingHidden = setOf("com.instagram.android", "com.whatsapp"),
++            visible = setOf("com.whatsapp"),
++            known = setOf("com.instagram.android", "com.whatsapp"),
++            self = "app.mlauncher.blackout"
++        )
++        assertEquals(setOf("com.instagram.android"), hidden)
++    }
++
++    /** Some phones ship system packages hidden. They were never apps to the person: ignore them. */
++    @Test
++    fun aPackageNeverSeenAsAnAppDoesNotCount() {
++        val hidden = BlackoutLogic.hiddenApps(
++            installedIncludingHidden = setOf("com.vendor.hiddenthing"),
++            visible = emptySet(),
++            known = setOf("com.whatsapp"),
++            self = "app.mlauncher.blackout"
++        )
++        assertTrue(hidden.isEmpty())
++    }
++
++    @Test
++    fun visibleAppsAreNeverHidden() {
++        val hidden = BlackoutLogic.hiddenApps(
++            installedIncludingHidden = setOf("com.whatsapp"),
++            visible = setOf("com.whatsapp"),
++            known = setOf("com.whatsapp"),
++            self = "app.mlauncher.blackout"
++        )
++        assertTrue(hidden.isEmpty())
++    }
++
++    @Test
++    fun theLauncherNeverCountsItself() {
++        val hidden = BlackoutLogic.hiddenApps(
++            installedIncludingHidden = setOf("app.mlauncher.blackout"),
++            visible = emptySet(),
++            known = setOf("app.mlauncher.blackout"),
++            self = "app.mlauncher.blackout"
++        )
++        assertTrue(hidden.isEmpty())
++    }
++
++    // --- the snapshot both kinds of resting go into ---
++
++    @Test
++    fun suspendedAndHiddenAppsAreBothResting() {
++        val s = RestingApps.Snapshot(suspended = setOf("a"), hidden = setOf("b"))
++        assertTrue(s.isResting("a"))
++        assertTrue(s.isResting("b"))
++        assertFalse(s.isResting("c"))
++        assertFalse(s.isResting(""))
++        assertEquals(2, s.count)
++    }
++
++    @Test
++    fun anAppBothSuspendedAndHiddenCountsOnce() {
++        assertEquals(1, RestingApps.Snapshot(setOf("a"), setOf("a")).count)
++    }
++
++    // --- countdown ---
++
++    @Test
++    fun countdownCountsWholeDays() {
++        assertEquals(131L, BlackoutLogic.countdownDays(today, "2027-02-01"))
++    }
++
++    @Test
++    fun countdownOnTheDayIsZero() {
++        assertEquals(0L, BlackoutLogic.countdownDays(today, "2026-09-23"))
++    }
++
++    @Test
++    fun aPassedCountdownDisappears() {
++        assertNull(BlackoutLogic.countdownDays(today, "2026-09-22"))
++    }
++
++    @Test
++    fun noOrBrokenDateMeansNoCountdown() {
++        assertNull(BlackoutLogic.countdownDays(today, ""))
++        assertNull(BlackoutLogic.countdownDays(today, "next feb"))
++    }
++
++    // --- screen time ---
++
++    @Test
++    fun screenTimeReadsNaturally() {
++        assertEquals("1h 12m", BlackoutLogic.screenTime(72 * 60_000L))
++        assertEquals("45m", BlackoutLogic.screenTime(45 * 60_000L))
++        assertEquals("2h", BlackoutLogic.screenTime(120 * 60_000L))
++    }
++
++    @Test
++    fun underAMinuteShowsNothing() {
++        assertNull(BlackoutLogic.screenTime(59_000L))
++    }
++
++    // --- taps held back ---
++
++    @Test
++    fun tapsAddUpWithinADay() {
++        assertEquals(4, BlackoutLogic.nextHeldBack(storedDay = 100, storedCount = 3, today = 100))
++    }
++
++    @Test
++    fun aNewDayStartsFromOne() {
++        assertEquals(1, BlackoutLogic.nextHeldBack(storedDay = 99, storedCount = 30, today = 100))
++    }
++
++    @Test
++    fun yesterdaysTapsDontShowToday() {
++        assertEquals(0, BlackoutLogic.heldBackToday(storedDay = 99, storedCount = 30, today = 100))
++        assertEquals(30, BlackoutLogic.heldBackToday(storedDay = 100, storedCount = 30, today = 100))
++    }
++}
